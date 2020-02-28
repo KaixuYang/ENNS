@@ -12,12 +12,13 @@ class NeuralNet(nn.Module):
     """
     neural network class, with nn api
     """
-    def __init__(self, input_size: int, hidden_size: List[int], output_size: int):
+    def __init__(self, input_size: int, hidden_size: List[int], output_size: int, regression: bool = False):
         """
         initialization function
         @param input_size: input data dimension
         @param hidden_size: list of hidden layer sizes, arbitrary length
         @param output_size: output data dimension
+        @param regression: if true, y is treated as regression response, else classification
         """
         super().__init__()
         self.input_size = input_size
@@ -30,6 +31,7 @@ class NeuralNet(nn.Module):
         self.hiddens = nn.ModuleList([
             nn.Linear(self.hidden_size[h], self.hidden_size[h + 1]) for h in range(len(self.hidden_size) - 1)])
         self.output = nn.Linear(hidden_size[-1], output_size)
+        self.regression = regression
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -43,7 +45,8 @@ class NeuralNet(nn.Module):
             x = hidden(x)
             x = self.relu(x)
         x = self.output(x)
-        x = self.softmax(x)
+        if not self.regression:
+            x = self.softmax(x)
         return x
 
 
@@ -51,29 +54,35 @@ class DeepNet:
     """
     implements the deep neural network in "https://www.ijcai.org/proceedings/2017/0318.pdf"
     """
-    def __init__(self, max_feature: int, num_classes: int = 2, hidden_size: list = None, gpu: bool = True,
-                 q: int = 2, num_dropout: int = 50):
+    def __init__(self, max_feature: int, num_classes: int = 2, hidden_size: list = None,
+                 q: int = 2, num_dropout: int = 50, regression: bool = False):
         """
         initialization function
         @param max_feature: max number of features selected
-        @param num_classes: number of classes in label
+        @param num_classes: number of classes in label, ignored if regression is true
         @param hidden_size: a list of hidden layer sizes
-        @param gpu: whether to use gpu
         @param q: the norm used in feature selection
-        @param num_dropout: number of repititions of dropout implements when computing gradients
+        @param num_dropout: number of repetitions of dropout implements when computing gradients
+        @param regression: true for regression and false for classification
         """
-        self.gpu = gpu
+        self.device = torch.device('cpu')
+        if torch.cuda.is_available():
+            self.device = torch.device('cuda')
         """model parameters"""
         self.max_feature = max_feature
         self.n = None
         self.p = None
         self.q = q  # norm used in feature selection
-        self.num_classes = num_classes
+        if regression:
+            self.num_classes = 1
+        else:
+            self.num_classes = num_classes
         if hidden_size is None:
             self.hidden_size = [50]
         else:
             self.hidden_size = hidden_size
         self.num_dropout = num_dropout
+        self.regression = regression
         """candidate sets"""
         self.S = None
         self.C = None
@@ -121,7 +130,10 @@ class DeepNet:
         self.batch_size = batch_size
         self.learning_rate = learning_rate
         self.epochs = epochs
-        self.criterion = nn.CrossEntropyLoss()
+        if not self.regression:
+            self.criterion = nn.CrossEntropyLoss()
+        else:
+            self.criterion = nn.MSELoss()
         self.n, self.p = x.shape
         if dropout_prop is None:
             self.dropout_prop = [0.5] * len(self.hidden_size)
@@ -138,9 +150,9 @@ class DeepNet:
         input_size = len(self.S)
         hidden_size = self.hidden_size
         output_size = self.num_classes
-        self.nnmodel = NeuralNet(input_size, hidden_size, output_size)
+        self.nnmodel = NeuralNet(input_size, hidden_size, output_size, self.regression).cuda(device=self.device)
         self.xavier_initialization()
-        x = x[:, self.S]
+        x = x[:, self.S].cuda(device=self.device)
         optimizer = torch.optim.Adam(self.nnmodel.parameters(), lr=self.learning_rate)
         trainset = []
         for i in range(x.shape[0]):
@@ -149,10 +161,14 @@ class DeepNet:
         for e in range(self.epochs):
             running_loss = 0
             for data, label in trainloader:
-                input_0 = data.view(data.shape[0], -1)
+                input_0 = data.view(data.shape[0], -1).cuda(device=self.device)
                 optimizer.zero_grad()
-                output = self.nnmodel(input_0.float())
-                loss = self.criterion(output, label.squeeze(1))
+                output = self.nnmodel(input_0.float()).cuda(device=self.device)
+                label = label.squeeze(1).cuda(device=self.device)
+                if self.regression:
+                    output = output.squeeze(1).float().cuda(device=self.device)
+                    label = label.float().cuda(device=self.device)
+                loss = self.criterion(output, label).cuda(device=self.device)
                 loss.backward()
                 optimizer.step()
                 running_loss += loss.item()
@@ -171,18 +187,19 @@ class DeepNet:
         elif len(self.dropout_prop) < len(self.hidden_size):
             warn(f"Too few dropout proportions, dropout won't be applied to the last "
                  f"{len(self.hidden_size) - len(self.dropout_prop) - 1} layers")
-        model_dp = copy.deepcopy(self.nnmodel)
+        model_dp = copy.deepcopy(self.nnmodel).cuda(device=self.device)
         for h in range(min(len(self.hidden_size) - 1, len(self.dropout_prop))):
             prop = self.dropout_prop[h]
             h_size = self.hidden_size[h]
             dropout_index = np.random.choice(range(h_size), int(h_size * prop), replace=False)
             model_dp.hiddens[h].weight[:, dropout_index] = torch.zeros(
-                model_dp.hiddens[h].weight[:, dropout_index].shape)
+                model_dp.hiddens[h].weight[:, dropout_index].shape).cuda(device=self.device)
         if len(self.hidden_size) <= len(self.dropout_prop):
             prop = self.dropout_prop[len(self.hidden_size) - 1]
             h_size = self.hidden_size[-1]
             dropout_index = np.random.choice(range(h_size), int(h_size * prop), replace=False)
-            model_dp.output.weight[:, dropout_index] = torch.zeros(model_dp.output.weight[:, dropout_index].shape)
+            model_dp.output.weight[:, dropout_index] = torch.zeros(model_dp.output.weight[:, dropout_index].shape)\
+                .cuda(device=self.device)
         return model_dp
 
     def compute_input_gradient(self, x: torch.Tensor, y: torch.Tensor, model: nn.Module) -> torch.Tensor:
@@ -193,17 +210,21 @@ class DeepNet:
         @param model: the model after dropout
         @return: the input weight gradients
         """
-        model_gr = NeuralNet(self.p, self.hidden_size, self.num_classes)
-        temp = torch.zeros(model_gr.input.weight.shape)
-        temp[:, self.S] = model.input.weight
-        model_gr.input.weight.data = temp
+        model_gr = NeuralNet(self.p, self.hidden_size, self.num_classes, self.regression).cuda(device=self.device)
+        temp = torch.zeros(model_gr.input.weight.shape).cuda(device=self.device)
+        temp[:, self.S] = model.input.weight.cuda(device=self.device)
+        model_gr.input.weight.data = temp.cuda(device=self.device)
         for h in range(len(self.hidden_size) - 1):
-            model_gr.hiddens[h].weight.data = model.hiddens[h].weight
-        model_gr.output.weight.data = model.output.weight
-        output_gr = model_gr(x.float())
-        loss_gr = self.criterion(output_gr, y.squeeze(1))
+            model_gr.hiddens[h].weight.data = model.hiddens[h].weight.cuda(device=self.device)
+        model_gr.output.weight.data = model.output.weight.cuda(device=self.device)
+        output_gr = model_gr(x.float()).cuda(device=self.device)
+        y = y.squeeze(1).cuda(device=self.device)
+        if self.regression:
+            output_gr = output_gr.squeeze(1).float().cuda(device=self.device)
+            y = y.float().cuda(device=self.device)
+        loss_gr = self.criterion(output_gr, y).cuda(device=self.device)
         loss_gr.backward()
-        input_gradient = model_gr.input.weight.grad
+        input_gradient = model_gr.input.weight.grad.cuda(device=self.device)
         return input_gradient
 
     def average_input_gradient(self, x: torch.Tensor, y: torch.Tensor, num_average: int):
@@ -263,23 +284,25 @@ class DeepNet:
         @return: None
         """
         if self.last_model is not None:
-            weight = torch.zeros(self.hidden_size[0], len(self.S))
+            weight = torch.zeros(self.hidden_size[0], len(self.S)).cuda(device=self.device)
             nn.init.xavier_normal_(weight, gain=nn.init.calculate_gain('relu'))
             old_s = self.S.copy()
             if self.new in old_s:
                 old_s.remove(self.new)
             for i in self.S:
                 if i != self.new:
-                    weight[:, self.S.index(i)] = self.last_model.input.weight.data[:, old_s.index(i)]
-            self.nnmodel.input.weight.data = weight
+                    weight[:, self.S.index(i)] = self.last_model.input.weight.data[:, old_s.index(i)]\
+                        .cuda(device=self.device)
+            self.nnmodel.input.weight.data = weight.cuda(device=self.device)
             for h in range(len(self.hidden_size) - 1):
-                self.nnmodel.hiddens[h].weight.data = self.last_model.hiddens[h].weight.data
-            self.nnmodel.output.weight.data = self.last_model.output.weight.data
+                self.nnmodel.hiddens[h].weight.data = self.last_model.hiddens[h].weight.data.cuda(device=self.device)
+            self.nnmodel.output.weight.data = self.last_model.output.weight.data.cuda(device=self.device)
         else:
             print(f"First iter, no Xavier initialization needed.")
 
     def train(self, x: torch.Tensor, y: torch.Tensor, batch_size: int = 100, learning_rate: float = 0.005,
-              epochs: int = 50, dropout_prop: list = None, val: list = None, verbosity: int = 0):
+              epochs: int = 50, dropout_prop: list = None, val: list = None, verbosity: int = 0,
+              return_select: bool = False) -> List:
         """
         train the deep neural network on x and y
         @param x: the training data
@@ -290,34 +313,79 @@ class DeepNet:
         @param dropout_prop: a list of proportions of dropout in each hidden layer
         @param val: a list of x_val and y_val
         @param verbosity: 0-print everything; 1-print result only; 2-print nothing
+        @param return_select: whether to return the selected variable indices
         """
         x = self.numpy_to_torch(x)
-        y = self.numpy_to_torch(y)
-        x = self.add_bias(x)
+        y = self.numpy_to_torch(y).cuda(device=self.device)
+        x = self.add_bias(x).cuda(device=self.device)
         """set parameters"""
         self.set_parameters(x, batch_size, learning_rate, epochs, dropout_prop)
         """initialization"""
         self.initialize()
         """start feature selection"""
+        selection = []
         while len(self.S) < self.max_feature + 1:
-            self.update_nn_weight(x, y, verbosity)
-            input_gradient = self.average_input_gradient(x, y, self.num_dropout)
+            self.update_nn_weight(x, y, verbosity=verbosity)
+            input_gradient = self.average_input_gradient(x, y, self.num_dropout).cuda(device=self.device)
             self.new = self.find_next_input(input_gradient)
+            selection.append(self.new)
             self.update_sets(self.new)
             if verbosity == 0:
                 print(f"Number of features selected is {len(self.S) - 1}.")
             if val is not None and verbosity <= 1:
                 pred = self.predict(val[0])
                 print(f"Validation accuracy is {np.mean(abs(pred.squeeze() - val[1].squeeze()))}")
-        self.update_nn_weight(x, y)
+        self.update_nn_weight(x, y, verbosity=verbosity)
         if verbosity <= 1:
             print(f"Feature selection completed, selected features are {self.selected}")
+        if return_select:
+            return selection
+        else:
+            return []
+
+    def train_return_next(self, x: torch.Tensor, y: torch.Tensor, batch_size: int = 100, learning_rate: float = 0.005,
+                         epochs: int = 50, dropout_prop: list = None, val: list = None, verbosity: int = 0,
+                         return_select: bool = False, initial: list = None) -> List:
+        """
+        train with some initially added predictors and return the next
+        @param x: the training data
+        @param y: the training label
+        @param batch_size: batch size
+        @param learning_rate: learning rate
+        @param epochs: number of epochs
+        @param dropout_prop: a list of proportions of dropout in each hidden layer
+        @param val: a list of x_val and y_val
+        @param verbosity: 0-print everything; 1-print result only; 2-print nothing
+        @param return_select: whether to return the selected variable indices
+        @param initial: the initially added predictors
+        """
+        if initial is None:
+            self.train(x, y, batch_size, learning_rate, epochs, dropout_prop, val, verbosity, return_select)
+        else:
+            x = self.numpy_to_torch(x)
+            y = self.numpy_to_torch(y)
+            x = self.add_bias(x)
+            self.S = initial
+            if 0 not in self.S:
+                self.S = [0] + self.S
+            input_size = len(self.S)
+            hidden_size = self.hidden_size
+            output_size = self.num_classes
+            self.nnmodel = NeuralNet(input_size, hidden_size, output_size, self.regression)
+            self.set_parameters(x, batch_size, learning_rate, epochs, dropout_prop)
+            self.update_nn_weight(x, y, verbosity)
+            self.last_model = copy.deepcopy(self.nnmodel)
+            self.update_nn_weight(x, y, verbosity)
+            input_gradient = self.average_input_gradient(x, y, self.num_dropout)
+            self.new = self.find_next_input(input_gradient)
+            return [self.new]
+
 
     def predict(self, x, prob: bool = False) -> torch.Tensor:
         """
         making prediction with the trained model of the given x
         @param x: the testing data
-        @param prob: whether to return probability or class labels
+        @param prob: whether to return probability or class labels, ignored if regression is true
         @return: the prediction of y
         """
         if self.nnmodel is None:
@@ -328,7 +396,7 @@ class DeepNet:
             raise ValueError("Dimension of x is wrong.")
         x = x[:, list(self.S)].float()
         y_pred = self.nnmodel(x)
-        if prob:
+        if self.regression or prob:
             return y_pred
         y_pred = torch.argmax(y_pred, dim=1)
         return y_pred
@@ -347,9 +415,17 @@ class DeepNet:
         y_pred = y_pred.squeeze().float()
         y = self.numpy_to_torch(y)
         y = y.squeeze().float()
-        acc = 1 - (abs(y - y_pred)).mean().item()
-        auc = roc_auc_score(y.detach().numpy(), prob_pred.detach().numpy())
-        f1 = f1_score(y.detach().numpy(), y_pred.detach().numpy())
-        print(f"Testing accuracy is {acc}.\nTesting auc is {auc}.\nTesting f1 score is {f1}.")
+        if not self.regression:
+            acc = 1 - (abs(y - y_pred)).mean().item()
+            auc = roc_auc_score(y.detach().numpy(), prob_pred.detach().numpy())
+            f1 = f1_score(y.detach().numpy(), y_pred.detach().numpy())
+            print(f"Testing accuracy is {acc}.\nTesting auc is {auc}.\nTesting f1 score is {f1}.")
+        else:
+            mse = np.mean(np.square(y_pred.numpy() - y.numpy()))
+            mae = np.mean(np.abs(y_pred.numpy() - y.numpy()))
+            mape = np.mean(np.abs(y_pred.numpy() - y.numpy()) / np.abs(y.numpy()))
         if return_res:
-            return acc, auc, f1
+            if not self.regression:
+                return acc, auc, f1
+            else:
+                return mse, mae, mape
