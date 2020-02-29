@@ -164,7 +164,9 @@ class DeepNet:
                 input_0 = data.view(data.shape[0], -1).cuda(device=self.device)
                 optimizer.zero_grad()
                 output = self.nnmodel(input_0.float()).cuda(device=self.device)
-                label = label.squeeze(1).cuda(device=self.device)
+                if len(label.shape) > 1:
+                    label = label.squeeze(1)
+                label = label.cuda(device=self.device)
                 if self.regression:
                     output = output.squeeze(1).float().cuda(device=self.device)
                     label = label.float().cuda(device=self.device)
@@ -218,7 +220,9 @@ class DeepNet:
             model_gr.hiddens[h].weight.data = model.hiddens[h].weight.cuda(device=self.device)
         model_gr.output.weight.data = model.output.weight.cuda(device=self.device)
         output_gr = model_gr(x.float()).cuda(device=self.device)
-        y = y.squeeze(1).cuda(device=self.device)
+        if len(y.shape) > 1:
+            y = y.squeeze(1)
+        y = y.cuda(device=self.device)
         if self.regression:
             output_gr = output_gr.squeeze(1).float().cuda(device=self.device)
             y = y.float().cuda(device=self.device)

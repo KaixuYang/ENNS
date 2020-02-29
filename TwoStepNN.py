@@ -38,7 +38,7 @@ class TwoStepNet(DeepNet):
         for i in range(num_bagging):
             index = np.random.choice(list(range(size)), size=int(size * sample_prop), replace=False)
             x_train = x[index, :]
-            y_train = y[index, :]
+            y_train = y[index]
             self.train(x_train, y_train, verbosity=verbosity, learning_rate=learning_rate, epochs=epochs)
             if verbosity == 0:
                 print(f"Features selected {self.S}")
