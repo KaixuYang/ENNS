@@ -162,7 +162,7 @@ class TwoStepNet(DeepNet):
         input_size = x.shape[1]
         hidden_size = self.hidden_size
         output_size = self.num_classes
-        model = NeuralNet(input_size, hidden_size, output_size)
+        model = NeuralNet(input_size, hidden_size, output_size, self.regression)
         if xavier:
             torch.nn.init.xavier_normal_(model.input.weight, gain=torch.nn.init.calculate_gain('relu'))
             for i in range(len(hidden_size)-1):
@@ -172,6 +172,7 @@ class TwoStepNet(DeepNet):
         val_list = []
         best_model = None
         best_acc = -np.inf
+        best_mse = np.inf
         trainset = []
         for i in range(x.shape[0]):
             trainset.append([x[i, :], y[i]])
@@ -182,8 +183,23 @@ class TwoStepNet(DeepNet):
                 input_0 = data.view(data.shape[0], -1)
                 optimizer.zero_grad()
                 output = model(input_0.float())
-                loss = torch.nn.CrossEntropyLoss()(output, label.squeeze(1))
-                if l1:
+                if len(label.shape) > 1:
+                    label = label.squeeze(1)
+                if self.regression:
+                    if len(output.shape) > 1:
+                        output = output.squeeze(1)
+                    loss = torch.nn.MSELoss()(output, label)
+                else:
+                    loss = torch.nn.CrossEntropyLoss()(output, label)
+                if l1:                pred = torch.argmax(pred, 1)
+                accuracy_1 = 1 - torch.mean(abs(pred.squeeze() - y_v.squeeze()).float()).item()
+                val_list.append(accuracy_1)
+                if accuracy_1 > best_acc:
+                    best_acc = accuracy_1
+                    best_model = copy.deepcopy(model)
+                if verbosity == 0:
+                    print(f"Epoch: {e + 1}\nTraining loss: {running_loss/len(trainloader)}. Validation accuracy "
+                          f"is {accuracy_1}")
                     if lam is None:
                         raise ValueError("lam needs to be specified when l1 is True.")
                     else:
@@ -202,15 +218,27 @@ class TwoStepNet(DeepNet):
                     x_v = x_v[:, [i-1 for i in self.S if i != 0]]
                 y_v = self.numpy_to_torch(val[1])
                 pred = model(x_v.float())
-                pred = torch.argmax(pred, 1)
-                accuracy_1 = 1 - torch.mean(abs(pred.squeeze() - y_v.squeeze()).float()).item()
-                val_list.append(accuracy_1)
-                if accuracy_1 > best_acc:
-                    best_acc = accuracy_1
-                    best_model = copy.deepcopy(model)
-                if verbosity == 0:
-                    print(f"Epoch: {e + 1}\nTraining loss: {running_loss/len(trainloader)}. Validation accuracy "
-                          f"is {accuracy_1}")
+                if self.regression:
+                    if len(y_v.shape) > 1:
+                        y_v = y_v.squeeze(1)
+                    mse = torch.nn.MSELoss()(pred, y_v).item()
+                    val_list.append(mse)
+                    if mse < best_mse:
+                        best_mse = mse
+                        best_model = copy.deepcopy(model)
+                    if verbosity == 0:
+                        print(f"Epoch: {e + 1}\nTraining loss: {running_loss/len(trainloader)}. Validation MSE "
+                              f"is {mse}")
+                else:
+                    pred = torch.argmax(pred, 1)
+                    accuracy_1 = 1 - torch.mean(abs(pred.squeeze() - y_v.squeeze()).float()).item()
+                    val_list.append(accuracy_1)
+                    if accuracy_1 > best_acc:
+                        best_acc = accuracy_1
+                        best_model = copy.deepcopy(model)
+                    if verbosity == 0:
+                        print(f"Epoch: {e + 1}\nTraining loss: {running_loss/len(trainloader)}. Validation accuracy "
+                              f"is {accuracy_1}")
             if val is not None and self.early_stopping(val_list, early_stopping_rounds):
                 self.final_model = copy.deepcopy(best_model)
                 print(f"Early stopped with patience {early_stopping_rounds}.")
@@ -262,15 +290,17 @@ class TwoStepNet(DeepNet):
             model.output.weight.data[model.output.weight.data.abs() < 0] += lam
         return model
 
-    @staticmethod
-    def early_stopping(val_list: list, rounds: int) -> bool:
+    def early_stopping(self, val_list: list, rounds: int) -> bool:
         """
         input a list of validation metrics and number of early stopping rounds and return whether to stop
         @param val_list: list of validation metrics
         @param rounds: number of early stopping rounds
         @return: whether to early stop
         """
-        best_idx = val_list.index(max(val_list))
+        if self.regression:
+            best_idx = val_list.index(min(val_list))
+        else:
+            best_idx = val_list.index(max(val_list))
         if len(val_list) - best_idx > rounds:
             return True
         else:
@@ -278,7 +308,8 @@ class TwoStepNet(DeepNet):
 
     def estimate_l1thres(self, x, y, quantile: Union[float, List[float]] = None, lam: float = None,
                          selection: list = None, verbosity: int = 0, learning_rate: float = 0.1, batch_size: int = 32,
-                         epochs: int = 50, val: list = None, xavier: bool = False, early_stopping_rounds: int = 30):
+                         epochs: int = 50, val: list = None, xavier: bool = False, early_stopping_rounds: int = 30,
+                         x_test=None, y_test=None):
         """
         estimates the neural network model with sparsity
         @param x: training data
@@ -302,7 +333,7 @@ class TwoStepNet(DeepNet):
         input_size = x.shape[1]
         hidden_size = self.hidden_size
         output_size = self.num_classes
-        model = NeuralNet(input_size, hidden_size, output_size)
+        model = NeuralNet(input_size, hidden_size, output_size, self.regression)
         if xavier:
             torch.nn.init.xavier_normal_(model.input.weight, gain=torch.nn.init.calculate_gain('relu'))
             for i in range(len(hidden_size)-1):
@@ -316,18 +347,33 @@ class TwoStepNet(DeepNet):
         val_list = []
         best_model = None
         best_acc = -np.inf
+        best_mse = np.inf
         for e in range(epochs):
             running_loss = 0
             for data, label in trainloader:
                 input_0 = data.view(data.shape[0], -1)
                 optimizer.zero_grad()
                 output = model(input_0.float())
-                loss = torch.nn.CrossEntropyLoss()(output, label.squeeze(1))
+                if len(label.shape) > 1:
+                    label = label.squeeze(1)
+                if self.regression:
+                    if len(output.shape) > 1:
+                        output = output.squeeze(1)
+                    loss = torch.nn.MSELoss()(output, label)
+                else:
+                    loss = torch.nn.CrossEntropyLoss()(output, label)
                 loss.backward()
                 optimizer.step()
                 model = self.l1_thres(model, quantile, lam)
                 output = model(input_0.float())
-                loss = torch.nn.CrossEntropyLoss()(output, label.squeeze(1))
+                if len(label.shape) > 1:
+                    label = label.squeeze(1)
+                if len(output.shape) > 1:
+                    output = output.squeeze(1)
+                if self.regression:
+                    loss = torch.nn.MSELoss()(output, label)
+                else:
+                    loss = torch.nn.CrossEntropyLoss()(output, label)
                 running_loss += loss.item()
             if val is None:
                 if verbosity == 0:
@@ -340,15 +386,42 @@ class TwoStepNet(DeepNet):
                     x_v = x_v[:, [i-1 for i in self.S if i != 0]]
                 y_v = self.numpy_to_torch(val[1])
                 pred = model(x_v.float())
-                pred = torch.argmax(pred, 1)
-                accuracy_1 = 1 - torch.mean(abs(pred.squeeze() - y_v.squeeze()).float()).item()
-                val_list.append(accuracy_1)
-                if accuracy_1 > best_acc:
-                    best_acc = accuracy_1
-                    best_model = copy.deepcopy(model)
-                if verbosity == 0:
-                    print(f"Epoch: {e + 1}\nTraining loss: {running_loss/len(trainloader)}. Validation accuracy "
-                          f"is {accuracy_1}")
+                if x_test is not None:
+                    if selection is not None:
+                        x_t = x_test[:, selection]
+                    else:
+                        x_t = x_test[:, [i-1 for i in self.S if i != 0]]
+                    test_pred = model(x_t.float())
+                # x_train = torch.from_numpy(x)
+                # x_train = x_train.float()
+                # y_train = torch.from_numpy(y)
+                # pred_train = model(x_train)
+                # mse_3 = torch.nn.MSELoss()(pred_train.squeeze(1), y_train.float()).item()
+                if self.regression:
+                    if len(pred.shape) > 1:
+                        pred = pred.squeeze(1)
+                    if len(y_v.shape) > 1:
+                        y_v = y_v.squeeze(1)
+                    mse_1 = torch.nn.MSELoss()(pred, y_v.float()).item()
+                    val_list.append(mse_1)
+                    if mse_1 < best_mse:
+                        best_mse = mse_1
+                        best_model = copy.deepcopy(model)
+                    if x_test is not None:
+                        mse_2 = torch.nn.MSELoss()(test_pred.squeeze(1), y_test.float()).item()
+                    if verbosity == 0:
+                        print(f"Epoch: {e + 1}\nTraining loss: {running_loss/len(trainloader)}. Validation MSE "
+                              f"is {mse_1}. Testing MSE is {mse_2}")
+                else:
+                    pred = torch.argmax(pred, 1)
+                    accuracy_1 = 1 - torch.mean(abs(pred.squeeze() - y_v.squeeze()).float()).item()
+                    val_list.append(accuracy_1)
+                    if accuracy_1 > best_acc:
+                        best_acc = accuracy_1
+                        best_model = copy.deepcopy(model)
+                    if verbosity == 0:
+                        print(f"Epoch: {e + 1}\nTraining loss: {running_loss/len(trainloader)}. Validation accuracy "
+                              f"is {accuracy_1}")
             if val is not None and self.early_stopping(val_list, early_stopping_rounds):
                 self.final_model = copy.deepcopy(best_model)
                 print(f"Early stopped with patience {early_stopping_rounds}.")
@@ -375,10 +448,11 @@ class TwoStepNet(DeepNet):
                 x = x[:, selection]
             x = self.numpy_to_torch(x)
             y_pred = self.final_model(x.float())
-            if prob:
+            if prob or self.regression:
                 return y_pred
-            y_pred = torch.argmax(y_pred, dim=1)
-            return y_pred
+            else:
+                y_pred = torch.argmax(y_pred, dim=1)
+                return y_pred
 
     def predict_bagging(self, x, selection: list = None, num_bagging: int = 100, drop_prop: list = None):
         self.nnmodel = self.final_model
@@ -394,10 +468,17 @@ class TwoStepNet(DeepNet):
         for i in range(num_bagging):
             model = self.dropout()
             if y_pred is None:
-                y_pred = torch.argmax(model(x.float()), dim=1)
+                if self.regression:
+                    y_pred = model(x.float())
+                else:
+                    y_pred = torch.argmax(model(x.float()), dim=1)
             else:
-                y_pred += torch.argmax(model(x.float()), dim=1)
+                if self.regression:
+                    y_pred += model(x.float())
+                else:
+                    y_pred += torch.argmax(model(x.float()), dim=1)
         y_pred = y_pred.float() / num_bagging
-        y_pred = torch.where(y_pred < 0.5, torch.tensor(0), torch.tensor(1))
+        if not self.regression:
+            y_pred = torch.where(y_pred < 0.5, torch.tensor(0), torch.tensor(1))
         return y_pred
 

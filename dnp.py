@@ -337,7 +337,7 @@ class DeepNet:
             if verbosity == 0:
                 print(f"Number of features selected is {len(self.S) - 1}.")
             if val is not None and verbosity <= 1:
-                pred = self.predict(val[0])
+                pred = self.nnmodel(val[0])
                 print(f"Validation accuracy is {np.mean(abs(pred.squeeze() - val[1].squeeze()))}")
         self.update_nn_weight(x, y, verbosity=verbosity)
         if verbosity <= 1:
@@ -395,10 +395,10 @@ class DeepNet:
         if self.nnmodel is None:
             raise ValueError("Model not trained, please run train first.")
         x = self.numpy_to_torch(x)
-        x = self.add_bias(x)
+        x = self.add_bias(x).cuda(device=self.device)
         if x.shape[1] != self.p:
             raise ValueError("Dimension of x is wrong.")
-        x = x[:, list(self.S)].float()
+        x = x[:, list(self.S)].float().cuda(device=self.device)
         y_pred = self.nnmodel(x)
         if self.regression or prob:
             return y_pred
