@@ -36,7 +36,7 @@ class TwoStepNet(DeepNet):
         size = x.shape[0]
         selection = {}
         for i in range(num_bagging):
-            index = np.random.choice(list(range(size)), size=int(size * sample_prop), replace=False)
+            index = np.random.choice(list(range(size)), size=int(size * sample_prop), replace=True)
             x_train = x[index, :]
             y_train = y[index]
             self.train(x_train, y_train, verbosity=verbosity, learning_rate=learning_rate, epochs=epochs)
@@ -191,21 +191,22 @@ class TwoStepNet(DeepNet):
                     loss = torch.nn.MSELoss()(output, label)
                 else:
                     loss = torch.nn.CrossEntropyLoss()(output, label)
-                if l1:                pred = torch.argmax(pred, 1)
-                accuracy_1 = 1 - torch.mean(abs(pred.squeeze() - y_v.squeeze()).float()).item()
-                val_list.append(accuracy_1)
-                if accuracy_1 > best_acc:
-                    best_acc = accuracy_1
-                    best_model = copy.deepcopy(model)
-                if verbosity == 0:
-                    print(f"Epoch: {e + 1}\nTraining loss: {running_loss/len(trainloader)}. Validation accuracy "
-                          f"is {accuracy_1}")
+                if l1:
                     if lam is None:
                         raise ValueError("lam needs to be specified when l1 is True.")
                     else:
                         loss = loss + self.l1_regularizer(model, lam)
                 loss.backward()
                 optimizer.step()
+                output = model(input_0.float())
+                if len(label.shape) > 1:
+                    label = label.squeeze(1)
+                if len(output.shape) > 1:
+                    output = output.squeeze(1)
+                if self.regression:
+                    loss = torch.nn.MSELoss()(output, label)
+                else:
+                    loss = torch.nn.CrossEntropyLoss()(output, label)
                 running_loss += loss.item()
             if val is None:
                 if verbosity == 0:
@@ -221,7 +222,7 @@ class TwoStepNet(DeepNet):
                 if self.regression:
                     if len(y_v.shape) > 1:
                         y_v = y_v.squeeze(1)
-                    mse = torch.nn.MSELoss()(pred, y_v).item()
+                    mse = torch.nn.MSELoss()(pred.float(), y_v.float()).item()
                     val_list.append(mse)
                     if mse < best_mse:
                         best_mse = mse
