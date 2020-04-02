@@ -8,13 +8,17 @@ from typing import Union, List
 class TwoStepNet(DeepNet):
 
     def __init__(self, max_feature: int, num_classes: int = 2, hidden_size: list = None,
-                 q: int = 2, num_dropout: int = 50, regression: bool = False):
+                 q: int = 2, num_dropout: int = 50, regression: bool = False, pre_feature: list = []):
         """
         init function
         """
         super(TwoStepNet, self).__init__(max_feature, num_classes, hidden_size, q, num_dropout, regression)
         self.final_model = None
         self.final_model_l1 = None
+        if 0 not in pre_feature:
+            self.pre_feature = [0] + pre_feature
+        else:
+            self.pre_feature = pre_feature
 
     def feature_selection_(
             self, x, y, num_bagging: int = 20, sample_prop: float = 0.8, appear_prop: float = 0.5, verbosity: int = 0,
@@ -94,23 +98,27 @@ class TwoStepNet(DeepNet):
         @param epochs: number of epochs
         @return: the feature set
         """
-        result = [0]
+        result = [i for i in self.pre_feature if i != 0]
         iters = 0
-        max_feature = self.max_feature
-        while self.max_feature > 0 and iters < 5:
+        max_feature = self.max_feature - len(self.pre_feature) + 1
+        print(f"Max feature is {max_feature}")
+        while max_feature > 0 and iters < 5:
             x_sub = np.delete(x, [i - 1 for i in result[1:]], axis=1)
             print(f"The dimension of x is: {x_sub.shape}")
             new_added = self.feature_selection_(x_sub, y, num_bagging, sample_prop, appear_prop, verbosity=verbosity,
                                                 learning_rate=learning_rate, epochs=epochs)
-            new_added = self.find_index(new_added, result)
+            print(f"old new added {new_added}")
+            #new_added = self.find_index(new_added, result)
+            print(f"new added {new_added}")
             if len(new_added) == 0:
                 iters += 1
             print(f"Newly added variables are: {new_added}")
             result += new_added
             result = list(set(result))
+            self.pre_feature = result
             print(f"Selection results are: {result}")
-            self.max_feature = max_feature - len(result) + 1
-            print(f"Max feature is {self.max_feature}")
+            max_feature = self.max_feature - len(result)
+            print(f"Max feature is {max_feature}")
         print(f"Final selection is: {result}")
         self.S = result
         return result
@@ -155,10 +163,13 @@ class TwoStepNet(DeepNet):
         @param early_stopping_rounds: patience to early stop
         @return: null
         """
-        if selection is not None:
-            x = x[:, selection]
+        if isinstance(x, np.ndarray):
+            x = torch.from_numpy(x)
+        if selection is None:
+            selection_result = [i-1 for i in self.S if i != 0]
         else:
-            x = x[:, [i - 1 for i in self.S if i != 0]]
+            selection_result = [i-1 for i in selection if i != 0]
+        x = x[:, selection_result]
         input_size = x.shape[1]
         hidden_size = self.hidden_size
         output_size = self.num_classes
@@ -327,10 +338,13 @@ class TwoStepNet(DeepNet):
         @param early_stopping_rounds: patience to stop
         @return: null
         """
-        if selection is not None:
-            x = x[:, selection]
+        if isinstance(x, np.ndarray):
+            x = torch.from_numpy(x)
+        if selection is None:
+            selection_result = [i-1 for i in self.S if i != 0]
         else:
-            x = x[:, [i - 1 for i in self.S if i != 0]]
+            selection_result = [i-1 for i in selection if i != 0]
+        x = x[:, selection_result]
         input_size = x.shape[1]
         hidden_size = self.hidden_size
         output_size = self.num_classes
@@ -443,11 +457,13 @@ class TwoStepNet(DeepNet):
         if self.final_model is None:
             print(f"Model not trained, use estimate first.")
         else:
+            if isinstance(x, np.ndarray):
+                x = torch.from_numpy(x)
             if selection is None:
-                x = x[:, [i - 1 for i in self.S if i != 0]]
+                selection_result = [i-1 for i in self.S if i != 0]
             else:
-                x = x[:, selection]
-            x = self.numpy_to_torch(x)
+                selection_result = [i for i in selection if i != 0]
+            x = x[:, selection_result]
             y_pred = self.final_model(x.float())
             if prob or self.regression:
                 return y_pred
@@ -456,18 +472,20 @@ class TwoStepNet(DeepNet):
                 return y_pred
 
     def predict_bagging(self, x, selection: list = None, num_bagging: int = 100, drop_prop: list = None):
-        self.nnmodel = self.final_model
+        self.nnmodel = self.final_model.cuda(device=self.device)
         y_pred = None
+        if isinstance(x, np.ndarray):
+            x = torch.from_numpy(x)
         if selection is None:
-            x = x[:, [i - 1 for i in self.S if i != 0]]
+            selection_result = [i-1 for i in self.S if i != 0]
         else:
-            x = x[:, selection]
-        x = self.numpy_to_torch(x)
+            selection_result = [i for i in selection if i != 0]
+        x = x[:, selection_result]
         if drop_prop is None:
             drop_prop = [0.5] * len(self.hidden_size)
         self.dropout_prop = drop_prop
         for i in range(num_bagging):
-            model = self.dropout()
+            model = self.dropout().cuda(device=self.device)
             if y_pred is None:
                 if self.regression:
                     y_pred = model(x.float())

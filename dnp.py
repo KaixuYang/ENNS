@@ -55,7 +55,7 @@ class DeepNet:
     implements the deep neural network in "https://www.ijcai.org/proceedings/2017/0318.pdf"
     """
     def __init__(self, max_feature: int, num_classes: int = 2, hidden_size: list = None,
-                 q: int = 2, num_dropout: int = 50, regression: bool = False):
+                 q: int = 2, num_dropout: int = 50, regression: bool = False, pre_feature: list = []):
         """
         initialization function
         @param max_feature: max number of features selected
@@ -64,6 +64,7 @@ class DeepNet:
         @param q: the norm used in feature selection
         @param num_dropout: number of repetitions of dropout implements when computing gradients
         @param regression: true for regression and false for classification
+        @param pre_feature: feature to be included
         """
         self.device = torch.device('cpu')
         if torch.cuda.is_available():
@@ -84,6 +85,7 @@ class DeepNet:
         self.num_dropout = num_dropout
         self.regression = regression
         """candidate sets"""
+        self.pre_feature = pre_feature
         self.S = None
         self.C = None
         self.new = None  # new feature to be added
@@ -113,9 +115,16 @@ class DeepNet:
         """
         initialize parameters
         """
-        self.S = [0]
-        self.selected = []
-        self.C = list(range(1, self.p))
+        if self.pre_feature == []:
+            self.S = [0]
+            self.selected = []
+            self.C = list(range(1, self.p))
+        else:
+            if 0 not in self.pre_feature:
+                self.pre_feature = [0] + self.pre_feature
+            self.S = [i for i in self.pre_feature]
+            self.selected = [i for i in self.pre_feature if i != 0]
+            self.C = [i for i in range(1, self.p) if i not in self.selected]
 
     def set_parameters(self, x: torch.Tensor, batch_size: int, learning_rate: float, epochs: int,
                        dropout_prop: list = None):
